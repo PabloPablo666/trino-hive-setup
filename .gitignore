@@ -1,0 +1,11 @@
+# data / volumes
+hive-data/
+pgdata/
+*.parquet
+
+# local noise
+.DS_Store
+*.log
+
+# secrets / env
+.env
