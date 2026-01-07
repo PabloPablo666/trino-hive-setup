@@ -14,10 +14,10 @@ from storage. All data lives **outside containers** and is queried directly via 
 
 The project follows a **standard lakehouse architecture**:
 
-- **Query engine**: Trino  
-- **Metastore**: Hive Metastore backed by Postgres  
-- **Storage**: External Parquet data lake  
-- **Orchestration**: Docker Compose  
+- **Query engine**: Trino
+- **Metastore**: Hive Metastore backed by Postgres
+- **Storage**: External Parquet data lake
+- **Orchestration**: Docker Compose
 
 Compute and metadata layers can be destroyed and rebuilt **without affecting the underlying data**.
 
@@ -25,62 +25,118 @@ Compute and metadata layers can be destroyed and rebuilt **without affecting the
 
 ## Repository contents
 
-```
 trino-hive-setup/
 ├── docker-compose.yml
+├── .env
 ├── trino-catalog/
-│   └── hive.properties
+│ └── hive.properties
 ├── bootstrap_discogs.sql
+├── sanity_checks_trino.sql
 └── README.md
-```
 
-The **data lake itself** is stored **outside this repository**:
 
-```
+The `.env` file defines the external data lake location, for example:
+
+DISCOGS_DATA_LAKE=/absolute/path/to/discogs_data_lake/hive-data
+
+
+---
+
+## Data lake layout (external to this repository)
+
+The **data lake itself** is stored **outside this repository**, following a
+typed, canonical layout:
+
 discogs_data_lake/
 └── hive-data/
-    ├── artists_v1/
-    ├── artist_aliases_v1/
-    ├── artist_memberships_v1/
-    ├── releases_v6/
-    ├── labels_v10/
-    ├── masters_v1/
-    ├── collection/
-    └── warehouse_discogs/
-        └── artist_name_map_v1/
-```
+├── artists_v1_typed/
+├── artist_aliases_v1_typed/
+├── artist_memberships_v1_typed/
+├── masters_v1_typed/
+├── releases_v6/
+├── labels_v10/
+├── collection/
+└── warehouse_discogs/
+├── artist_name_map_v1/
+├── release_artists_v1/
+├── release_label_xref_v1/
+└── ...
+
+
+All datasets are stored as **external Parquet files** and are never written inside containers.
 
 ---
 
 ## Data model
 
-The lake is organized around **normalized Discogs entities and relationships**:
+This lakehouse follows a **typed-first physical model** with a **stable logical API**.
 
-- **artists_v1**
-- **artist_aliases_v1**
-- **artist_memberships_v1**
-- **releases_ref_v6**
-- **labels_ref_v10**
-- **masters_v1**
-- **collection**
+### Physical datasets (BASE TABLES)
 
-Derived datasets are stored under **warehouse_discogs**, for example:
+These tables point directly to Parquet storage and use **typed, consistent IDs**:
 
-- **artist_name_map_v1**  
-  Normalized artist name → artist ID mapping
+- `artists_v1_typed`
+- `artist_aliases_v1_typed`
+- `artist_memberships_v1_typed`
+- `masters_v1_typed`
+- `releases_ref_v6`
+- `labels_ref_v10`
+- `collection`
 
-All tables are defined as **external Parquet tables** and queried directly by **Trino**.
+### Derived / warehouse datasets
+
+Stored under `warehouse_discogs`, for example:
+
+- `artist_name_map_v1`
+- `release_artists_v1`
+- `release_label_xref_v1`
+- other analytical bridge or fact-style tables
+
+### Logical API (VIEWs)
+
+For stability and backward compatibility, the following **logical views** are defined:
+
+- `artists_v1`
+- `artist_aliases_v1`
+- `artist_memberships_v1`
+- `masters_v1`
+
+These views point to the corresponding `*_v1_typed` physical tables and should be
+treated as the **canonical query interface**.
 
 ---
 
 ## Reproducibility model
 
-- **Storage** is persistent and external to Docker  
-- **Compute** layer is stateless  
-- **Schema and tables** are managed via an **idempotent SQL bootstrap**  
-- **No reliance on temporary directories**
+- **Storage** is external and persistent
+- **Compute** (Trino) is stateless
+- **Metadata** (Hive Metastore) can be safely destroyed and recreated
+- **Schema and tables** are created via an **idempotent bootstrap SQL**
 
-If the Hive Metastore is reset, the entire schema can be recreated **without rebuilding the data lake**.
+If the metastore is reset, running `bootstrap_discogs.sql` fully restores:
+- schemas
+- external tables
+- logical views
+
+without rebuilding or moving the underlying data.
+
+---
+
+## Data guarantees & known anomalies
+
+This lakehouse reflects Discogs data *as-is*.
+
+The following conditions are expected and valid:
+- Artist aliases may reference artist IDs not present in `artists_v1`
+- Some parent label references may point to missing labels
+- Multiple artist entities may share identical real names
+
+These are upstream data characteristics, not ingestion errors.
+
+Sanity checks are designed to:
+- detect structural corruption
+- quantify upstream inconsistencies
+- prevent silent schema drift
 
 ---
 
@@ -88,21 +144,22 @@ If the Hive Metastore is reset, the entire schema can be recreated **without reb
 
 ### Start services
 
-```
 docker compose up -d
-```
 
-### Bootstrap schema and tables
 
-```
+### Bootstrap schema, tables, and views
+
 docker exec -it trino trino --catalog hive --file /etc/trino/bootstrap_discogs.sql
-```
+
+
+### Run sanity checks (optional but recommended)
+
+docker exec -it trino trino --catalog hive --file /etc/trino/sanity_checks_trino.sql
+
 
 ### Verify tables
 
-```
 docker exec -it trino trino --catalog hive --schema discogs --execute "SHOW TABLES"
-```
 
 ---
 
@@ -110,18 +167,16 @@ docker exec -it trino trino --catalog hive --schema discogs --execute "SHOW TABL
 
 ### Stop services safely (no data loss)
 
-```
 docker compose down
-```
+
 
 ### Reset metastore only (do not use casually)
 
-```
 docker compose down -v
-```
 
-This deletes **metastore metadata only**.  
-Data files remain intact and can be re-registered using the bootstrap SQL.
+
+This removes **metastore metadata only**.  
+All Parquet data remains intact and can be re-registered using the bootstrap SQL.
 
 ---
 
@@ -129,8 +184,9 @@ Data files remain intact and can be re-registered using the bootstrap SQL.
 
 - **Externalized storage**
 - **Stateless compute**
+- **Typed canonical datasets**
+- **Logical API via views**
 - **SQL-first analytics**
-- **Explicit schema definitions**
 - **Reproducible infrastructure**
 
 ---
