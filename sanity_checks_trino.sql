@@ -112,6 +112,13 @@ LEFT JOIN artists_v1 a
   ON m.group_id = a.artist_id
 WHERE a.artist_id IS NULL;
 
+SELECT
+  COUNT(*) AS rows,
+  COUNT(DISTINCT (group_id, member_id)) AS distinct_pairs,
+  CAST(COUNT(*) AS DOUBLE) / COUNT(DISTINCT (group_id, member_id)) AS dup_ratio
+FROM artist_memberships_v1_typed;
+
+
 -- =========================================================
 -- 4️⃣ labels_ref_v10
 -- =========================================================

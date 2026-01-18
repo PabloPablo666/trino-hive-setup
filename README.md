@@ -1,199 +1,349 @@
-# Discogs Lakehouse
-## Local Trino + Hive Metastore
+Discogs Lakehouse
 
-This repository contains a **fully reproducible local lakehouse setup** built on
-**Trino**, **Hive Metastore**, and **external Parquet tables**, designed for
-analytical workloads on large Discogs datasets.
+Local Trino + Hive Metastore (Run-based, reproducible)
 
-The system is **local-first**, **compute-stateless**, and **explicitly decoupled**
-from storage. All data lives **outside containers** and is queried directly via **SQL**.
+This repository contains a fully reproducible local lakehouse setup built on:
+	•	Trino (SQL engine)
+	•	Hive Metastore (Postgres-backed)
+	•	External Parquet data lake
 
----
+The system is designed to behave like a real data platform, not a demo:
+	•	storage is immutable per run
+	•	compute is stateless
+	•	metadata is rebuildable
+	•	validation is explicit and versioned
 
-## Architecture
-
-The project follows a **standard lakehouse architecture**:
-
-- **Query engine**: Trino
-- **Metastore**: Hive Metastore backed by Postgres
-- **Storage**: External Parquet data lake
-- **Orchestration**: Docker Compose
-
-Compute and metadata layers can be destroyed and rebuilt **without affecting the underlying data**.
-
----
-
-## Repository contents
-
-trino-hive-setup/
-├── docker-compose.yml
-├── .env
-├── trino-catalog/
-│ └── hive.properties
-├── bootstrap_discogs.sql
-├── sanity_checks_trino.sql
-└── README.md
+================================================================================
 
 
-The `.env` file defines the external data lake location, for example:
+Core idea
 
-DISCOGS_DATA_LAKE=/absolute/path/to/discogs_data_lake/hive-data
+This lakehouse follows three strict rules:
+	1.	Data is never written inside containers
+	2.	Every ingestion produces a versioned run
+	3.	Only one run is “active” at a time
+
+Everything else derives from this.
+
+================================================================================
 
 
----
+Architecture
 
-## Data lake layout (external to this repository)
+┌─────────────────────────────┐
+│        Trino (SQL)          │
+│   stateless, replaceable    │
+└─────────────┬───────────────┘
+              │
+┌─────────────▼───────────────┐
+│      Hive Metastore         │
+│   Postgres-backed metadata  │
+└─────────────┬───────────────┘
+              │
+┌─────────────▼────────────────────────────────────┐
+│            External Data Lake                     │
+│  (mounted read-only inside containers)            │
+└────────────────────────────────────────────────────┘
 
-The **data lake itself** is stored **outside this repository**, following a
-typed, canonical layout:
+• Trino can be restarted or replaced freely
+
+• Metastore can be dropped and rebuilt
+
+• Data always remains intact on disk
+
+================================================================================
+
+
+Repositories
+
+This project is intentionally split:
+
+
+1️⃣ Infrastructure (this repo)
+
+trino-hive-setup
+
+• Docker Compose
+
+• Trino runtime configuration
+
+• Hive Metastore
+
+• Bootstrap SQL
+
+•  Trino sanity checks
+
+This repo never parses data.
+
+
+2️⃣ Pipelines & tests (separate repo)
+
+discogs_tools_refactor
+
+• XML → Parquet ingestion
+
+• Typed schemas
+
+• DuckDB tests
+
+• Run-based lake layout
+
+• Trino sanity report generation
+
+Infrastructure and pipelines evolve independently.
+
+================================================================================
+
+
+Data lake layout
+
+The data lake lives outside Docker.
+
+Example:
 
 discogs_data_lake/
 └── hive-data/
-├── artists_v1_typed/
-├── artist_aliases_v1_typed/
-├── artist_memberships_v1_typed/
-├── masters_v1_typed/
-├── releases_v6/
-├── labels_v10/
-├── collection/
-└── warehouse_discogs/
-├── artist_name_map_v1/
-├── release_artists_v1/
-├── release_label_xref_v1/
-└── ...
+    ├── _runs/
+    │   ├── 20260118_004418/
+    │   │   ├── artists_v1_typed/
+    │   │   ├── masters_v1_typed/
+    │   │   ├── releases_v6/
+    │   │   ├── labels_v10/
+    │   │   ├── warehouse_discogs/
+    │   │   └── _reports/
+    │   │       └── trino_sanity_active_*.csv
+    │   │
+    │   └── 20251215_231122/
+    │
+    ├── active -> _runs/20260118_004418
+    └── active__prev_20260117_192144
+
+    Key concepts
+
+    • _runs/<timestamp>
+      Immutable snapshot of a full ingestion.
+
+    • active (symlink)
+      Points to the currently selected run.
+
+    • active__prev_*
+      Automatic rollback pointer.
+
+    Trino always queries active.
+
+    Changing the active dataset is instant and does not touch data.
+
+================================================================================
+
+Why this matters
+
+This gives you:
+
+• reproducible historical snapshots
+
+• zero-copy rollback
+
+• deterministic analytics
+
+• safe experimentation
+
+• time-based comparisons (month vs month)
+
+You can keep:
+
+• November
+
+• December
+
+• January
+
+…and switch between them with a symlink.
+
+No rebuild. No rebootstrap. No SQL changes.
+
+================================================================================
 
 
-All datasets are stored as **external Parquet files** and are never written inside containers.
+Trino configuration
 
----
+Trino is configured via explicit config files mounted individually:
 
-## Data model
+trino-config/
+├── config.properties
+├── jvm.config
+└── node.properties
 
-This lakehouse follows a **typed-first physical model** with a **stable logical API**.
+This avoids Docker creating empty directories or shadowing defaults.
 
-### Physical datasets (BASE TABLES)
 
-These tables point directly to Parquet storage and use **typed, consistent IDs**:
+Memory configuration (example)
 
-- `artists_v1_typed`
-- `artist_aliases_v1_typed`
-- `artist_memberships_v1_typed`
-- `masters_v1_typed`
-- `releases_ref_v6`
-- `labels_ref_v10`
-- `collection`
+-Xmx8G
 
-### Derived / warehouse datasets
+query.max-memory=10GB
+query.max-memory-per-node=6GB
+memory.heap-headroom-per-node=1GB
 
-Stored under `warehouse_discogs`, for example:
+================================================================================
 
-- `artist_name_map_v1`
-- `release_artists_v1`
-- `release_label_xref_v1`
-- other analytical bridge or fact-style tables
 
-### Logical API (VIEWs)
+Catalog
 
-For stability and backward compatibility, the following **logical views** are defined:
+Catalogs live in:
 
-- `artists_v1`
-- `artist_aliases_v1`
-- `artist_memberships_v1`
-- `masters_v1`
+trino-catalog/
+└── hive.properties
 
-These views point to the corresponding `*_v1_typed` physical tables and should be
-treated as the **canonical query interface**.
+Example:
 
----
+connector.name=hive
+hive.metastore.uri=thrift://hive-metastore:9083
+hive.non-managed-table-writes-enabled=true
 
-## Reproducibility model
+================================================================================
 
-- **Storage** is external and persistent
-- **Compute** (Trino) is stateless
-- **Metadata** (Hive Metastore) can be safely destroyed and recreated
-- **Schema and tables** are created via an **idempotent bootstrap SQL**
 
-If the metastore is reset, running `bootstrap_discogs.sql` fully restores:
-- schemas
-- external tables
-- logical views
+Bootstrap model
 
-without rebuilding or moving the underlying data.
+All metadata is created via SQL:
 
----
+bootstrap_discogs.sql
 
-## Data guarantees & known anomalies
+This script is idempotent.
 
-This lakehouse reflects Discogs data *as-is*.
+It creates:
 
-The following conditions are expected and valid:
-- Artist aliases may reference artist IDs not present in `artists_v1`
-- Some parent label references may point to missing labels
-- Multiple artist entities may share identical real names
+schemas
 
-These are upstream data characteristics, not ingestion errors.
+external tables
 
-Sanity checks are designed to:
-- detect structural corruption
-- quantify upstream inconsistencies
-- prevent silent schema drift
+logical views
 
----
+If the metastore is deleted, running this file fully restores the lakehouse.
 
-## Quick start
+================================================================================
 
-### Start services
+
+Logical data model
+
+
+Physical tables (Parquet)
+	•	artists_v1_typed
+	•	artist_aliases_v1_typed
+	•	artist_memberships_v1_typed
+	•	masters_v1_typed
+	•	releases_ref_v6
+	•	labels_ref_v10
+	•	warehouse_discogs/*
+
+
+Logical API (views)
+	•	artists_v1
+	•	artist_aliases_v1
+	•	artist_memberships_v1
+	•	masters_v1
+
+Queries should target views, not physical paths.
+
+This allows schema evolution without breaking analytics.
+
+================================================================================
+
+
+Sanity checks
+
+Two layers of validation exist:
+
+
+1️⃣ Pipeline tests (DuckDB)
+
+Run during ingestion.
+	•	row counts
+	•	null checks
+	•	structural correctness
+
+
+2️⃣ Trino sanity report (this repo)
+
+Executed against the active run.
+
+Produces:
+
+_runs/<run_id>/_reports/trino_sanity_active_YYYYMMDD_HHMMSS.csv
+
+Each row contains:
+	•	check name
+	•	severity (CRITICAL / WARN / INFO)
+	•	value
+	•	pass/fail flag
+	•	optional details
+
+The pipeline fails hard on CRITICAL.
+
+================================================================================
+
+
+Operations
+
+
+Start stack
 
 docker compose up -d
 
 
-### Bootstrap schema, tables, and views
+Bootstrap metadata
 
-docker exec -it trino trino --catalog hive --file /etc/trino/bootstrap_discogs.sql
-
-
-### Run sanity checks (optional but recommended)
-
-docker exec -it trino trino --catalog hive --file /etc/trino/sanity_checks_trino.sql
+docker exec -it trino trino \
+  --catalog hive \
+  --file /etc/trino/bootstrap_discogs.sql
 
 
-### Verify tables
-
-docker exec -it trino trino --catalog hive --schema discogs --execute "SHOW TABLES"
-
----
-
-## Operations
-
-### Stop services safely (no data loss)
+Stop safely
 
 docker compose down
 
 
-### Reset metastore only (do not use casually)
+Reset metastore only
 
 docker compose down -v
 
+Data is untouched
 
-This removes **metastore metadata only**.  
-All Parquet data remains intact and can be re-registered using the bootstrap SQL.
+================================================================================
 
----
 
-## Design principles
+Design principles
 
-- **Externalized storage**
-- **Stateless compute**
-- **Typed canonical datasets**
-- **Logical API via views**
-- **SQL-first analytics**
-- **Reproducible infrastructure**
+	•	external immutable storage
+	•	run-based versioning
+	•	pointer-based activation
+	•	deterministic ingestion
+	•	explicit validation
+	•	zero hidden state
+	•	SQL-first visibility
 
----
+No magic.
+No mutable tables.
+No silent corruption.
 
-## Licensing note
+================================================================================
 
-Discogs data is subject to **Discogs terms and licensing**.
-This repository does **not** distribute Discogs datasets.
 
-It focuses exclusively on **infrastructure, schema, and tooling**.
+What this is NOT
+	•	not a scraper
+	•	not a data warehouse SaaS
+	•	not a toy project
+	•	not shipping Discogs data
+
+This is infrastructure and engineering discipline, applied locally.
+
+================================================================================
+
+
+License note
+
+Discogs data is subject to Discogs licensing.
+
+This repository contains only infrastructure, configuration, and SQL.
+
+No datasets are distributed.

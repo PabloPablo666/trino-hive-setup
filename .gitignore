@@ -9,3 +9,4 @@ pgdata/
 
 # secrets / env
 .env
+.DS_Store

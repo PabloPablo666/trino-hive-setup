@@ -38,7 +38,6 @@ services:
     networks:
       - trino-net
     healthcheck:
-      # Socket check su 9083 (senza curl/nc)
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/localhost/9083'"]
       interval: 5s
       timeout: 3s
@@ -53,13 +52,22 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./trino-catalog:/etc/trino/catalog
+      # ✅ Monta SOLO i file config (niente /etc/trino intero)
+      - ./trino-config/config.properties:/etc/trino/config.properties:ro
+      - ./trino-config/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino-config/node.properties:/etc/trino/node.properties:ro
+
+      # ✅ Catalog reale (quello del repo, non roba duplicata)
+      - ./trino-catalog:/etc/trino/catalog:ro
+
+      # ✅ Data lake
       - ${DISCOGS_DATA_LAKE}:/data/hive-data
-      - ./bootstrap_discogs.sql:/etc/trino/bootstrap_discogs.sql
+
+      # ✅ Bootstrap SQL (se lo usi)
+      - ./bootstrap_discogs.sql:/etc/trino/bootstrap_discogs.sql:ro
     networks:
       - trino-net
     healthcheck:
-      # Check HTTP minimalista su /v1/info (senza curl)
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/localhost/8080 && echo -e \"GET /v1/info HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && head -n 1 <&3 | grep -q \"200\"'"]
       interval: 10s
       timeout: 5s
